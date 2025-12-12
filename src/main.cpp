@@ -1,3 +1,9 @@
+/**
+ * A foto desse projeto montado esta dentro de images
+ * Irei Futuramente adicionar O passo a passo de como
+ * Montar fisicamente e garantir que o esp tenha 
+ * energia o bastante pra todos os 27 LEDs
+ */
 #include <WiFi.h>
 #include <WebServer.h>
 #include <math.h>   // Para sin() e outras funções matemáticas

@@ -75,6 +75,8 @@ O arquivo com as senhas não é enviado para o Git por segurança.
 .
 ├── images/                  # Fotos do projeto
 │   └── montagem_eletrica... # Foto da montagem física
+│   └── montagem_completa... # Foto da montagem completa
+│   └── teste_rainbow...     # Gif do Teste RGB Montado
 ├── include/                 # Headers globais
 ├── lib/                     # Bibliotecas privadas
 ├── src/                     # Código fonte principal

@@ -1,27 +1,49 @@
-/**
- * A foto desse projeto montado esta dentro de images
- * Irei Futuramente adicionar O passo a passo de como
- * Montar fisicamente e garantir que o esp tenha 
- * energia o bastante pra todos os 27 LEDs
- */
 #include <WiFi.h>
 #include <WebServer.h>
+#include <PubSubClient.h>
 #include <math.h>   // Para sin() e outras funções matemáticas
 #include <stdlib.h> // Para random()
 #include "secrets.h"
 
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+
 #define LEDC_TIMER_12_BIT 12
 #define LEDC_BASE_FREQ 5000
+#define LEDC_CHANNEL 0
 
 // Defina as credenciais da sua rede Wi-Fi
 const char* ssid = WIFI_SSID;       // Puxa do secrets.h
 const char* password = WIFI_PASSWORD; // Puxa do secrets.h
+
+const char* mqtt_server = MQTT_SERVER; 
+const int mqtt_port = MQTT_PORT;       // Geralmente 1883
+const char* mqtt_user = MQTT_USER;     // Opcional, porem recomendado
+const char* mqtt_password = MQTT_PASSWORD; // Opciona, porem recomendado
+const char* clientID = CLIENTID; // ID único para o broker
+
+
+// Tópicos para publicação
+const char* mqtt_topic_temp = MQTT_TOPIC_TEMP;
+const char* mqtt_topic_hum = MQTT_TOPIC_HUM;
 
 // Defina os GPIOs que você soldou no ESP32
 #define LED_R 33
 #define LED_G 32
 #define LED_B 25
 #define LED_W 26  // Opcional
+
+// --- Configuração do Sensor DHT11 ---
+#define DHTPIN 4       // Pino GPIO do ESP32 para o sensor DHT11
+#define DHTTYPE DHT11   // Tipo de sensor (DHT11 ou DHT22)
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// Variáveis para armazenar as leituras do DHT
+volatile float currentTemperatureC = 0.0; 
+volatile float currentHumidity = 0.0;
+volatile unsigned long lastTempReadTime = 0;
+const long readingInterval = 10000; // Leitura a cada 10 segundos (DHT11 deve ser lido no máximo a cada 2s)
 
 // Mapeamento dos nomes dos LEDs para os pinos GPIO
 const int ledPins[] = {LED_R, LED_G, LED_B, LED_W};
@@ -30,53 +52,69 @@ const int numLeds = sizeof(ledPins) / sizeof(ledPins[0]);
 
 // Objeto do servidor web na porta 80
 WebServer server(80);
+WiFiClient espClient;
+PubSubClient client(espClient);
 
 // --- Variáveis Globais de Controle de Efeitos ---
 volatile bool effectActive = false; 
 volatile unsigned long effectStartTime = 0;
-volatile float effectDuration = 0; // Duração do efeito em segundos (0 para infinito)
-volatile int effectTargetLedPin = -1; // LED alvo para efeitos individuais (Breathing, Strobe, Flicker)
+volatile float effectDuration = 0; 
+volatile int effectTargetLedPin = -1; 
 
-String currentEffectName = ""; // Nome do efeito ativo ("breathing", "strobe", "rainbow", "fire", "chase")
+String currentEffectName = ""; 
 
-// Variáveis para Efeito Strobe (declaradas globalmente)
+// Variáveis para Efeito Strobe 
 volatile unsigned long lastStrobeToggleTime = 0;
-volatile int strobePeriod = 100; // ms (intervalo entre ligar/desligar)
-volatile bool strobeLedState = false; // true = on, false = off
-volatile int strobeTargetLedPin = -1; // LED alvo para o strobe
+volatile int strobePeriod = 100; 
+volatile bool strobeLedState = false; 
+volatile int strobeTargetLedPin = -1; 
 
-// Variáveis para Efeito Rainbow (apenas para RGB, W será ignorado)
-volatile float rainbowHue = 0.0; // 0-360 para o ciclo de cores
-volatile int rainbowSpeed = 50; // Velocidade do ciclo em ms
+// Variáveis para Efeito Rainbow 
+volatile float rainbowHue = 0.0; 
+volatile int rainbowSpeed = 50; 
 
 // Variáveis para Efeito Fire Flicker
 volatile unsigned long lastFlickerTime = 0;
-volatile int flickerMin = 500; // Intensidade mínima para a chama
-volatile int flickerMax = 4095; // Intensidade máxima para a chama
-volatile int flickerDelayMin = 50; // Atraso mínimo entre as mudanças (ms)
-volatile int flickerDelayMax = 150; // Atraso máximo entre as mudanças (ms)
+volatile int flickerMin = 500; 
+volatile int flickerMax = 4095; 
+volatile int flickerDelayMin = 50; 
+volatile int flickerDelayMax = 150; 
 
 // Variáveis para Efeito Chase
 volatile unsigned long lastChaseUpdateTime = 0;
-volatile int chaseDelay = 150; // Atraso entre os LEDs (ms)
-volatile int currentChaseLed = 0; // Índice do LED ativo na sequência
+volatile int chaseDelay = 150; 
+volatile int currentChaseLed = 0; 
 
+void reconnect() {
+  // Loop até reconectar
+  while (!client.connected()) {
+    Serial.print("Tentando conexao MQTT...");
+    // Tenta conectar, usando as credenciais, se houver
+    if (client.connect(clientID, mqtt_user, mqtt_password)) {
+      Serial.println("conectado");
+      // Se desejar se inscrever em algum tópico, faça aqui
+      // client.subscribe("esp32/comando/#"); 
+    } else {
+      Serial.print("falhou, rc=");
+      Serial.print(client.state());
+      Serial.println(" Tentando novamente em 5 segundos");
+      // Espera 5 segundos antes de tentar novamente
+      delay(5000);
+    }
+  }
+}
 
-// --- Funções Auxiliares ---
+// --- Funções Auxiliares e de Leitura ---
 void setAllLeds(int r_val, int g_val, int b_val, int w_val) {
   ledcWrite(LED_R, r_val);
   ledcWrite(LED_G, g_val);
   ledcWrite(LED_B, b_val);
-  // Verifique se o LED_W é diferente de 0, caso ele não esteja definido.
-  // Embora você tenha definido, é uma boa prática para robustez.
   if (LED_W != 0) { 
     ledcWrite(LED_W, w_val);
   }
 }
 
 // Converte HSV para RGB (Hue, Saturation, Value -> Red, Green, Blue)
-// h: 0-360, s: 0-1, v: 0-1
-// Retorna um array de 3 ints para RGB
 int* hsvToRgb(float h, float s, float v) {
   static int rgb[3];
   float c = v * s;
@@ -103,7 +141,6 @@ int* hsvToRgb(float h, float s, float v) {
   rgb[1] = (int)((g_prime + m) * 4095);
   rgb[2] = (int)((b_prime + m) * 4095);
   
-  // Garante que os valores estejam dentro do range 0-4095
   for(int i=0; i<3; i++) {
     if(rgb[i] < 0) rgb[i] = 0;
     if(rgb[i] > 4095) rgb[i] = 4095;
@@ -112,10 +149,66 @@ int* hsvToRgb(float h, float s, float v) {
   return rgb;
 }
 
-// --- Funções de Efeito ---
+void handleNotFound() {
+  if (server.uri() == "/favicon.ico") {
+    server.send(204, "text/plain", "");
+  } else {
+    String message = "Pagina Nao Encontrada\n\n";
+    message += "URI: ";
+    message += server.uri();
+    message += "\nMethod: ";
+    message += (server.method() == HTTP_GET) ? "GET" : "POST";
+    message += "\nArgumentos: ";
+    message += server.args();
+    server.send(404, "text/plain", message);
+  }
+}
+
+void readDhtData() {
+  if (millis() - lastTempReadTime >= readingInterval) {
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+
+    if (isnan(h) || isnan(t)) {
+      Serial.println("Erro ao ler do sensor DHT!");
+    } else {
+      currentHumidity = h;
+      currentTemperatureC = t;
+      
+      Serial.print("Umidade: ");
+      Serial.print(currentHumidity);
+      Serial.print(" %\t");
+      Serial.print("Temperatura: ");
+      Serial.print(currentTemperatureC);
+      Serial.println(" *C");
+      
+      // --- PUBLICAÇÃO MQTT ---
+      String tempString = String(currentTemperatureC, 1);
+      String humString = String(currentHumidity, 1);
+      
+      if (client.connected()) {
+        // Publica a temperatura
+        client.publish(mqtt_topic_temp, tempString.c_str(), false); // false = não retido
+        Serial.print("Publicado no MQTT: ");
+        Serial.print(mqtt_topic_temp);
+        Serial.print(" -> ");
+        Serial.println(tempString);
+        
+        // Publica a umidade
+        client.publish(mqtt_topic_hum, humString.c_str(), false);
+        Serial.print("Publicado no MQTT: ");
+        Serial.print(mqtt_topic_hum);
+        Serial.print(" -> ");
+        Serial.println(humString);
+      } else {
+        Serial.println("Cliente MQTT desconectado. Nao publicou.");
+      }
+    }
+    lastTempReadTime = millis();
+  }
+}
 
 void runBreathingEffect() {
-  // Compara String não-volatile diretamente
   if (currentEffectName != "breathing") return; 
 
   unsigned long currentTime = millis();
@@ -125,11 +218,11 @@ void runBreathingEffect() {
     effectActive = false;
     ledcWrite(effectTargetLedPin, 0);
     Serial.println("Efeito breathing finalizado.");
-    currentEffectName = ""; // Atribuição direta
+    currentEffectName = ""; 
     return;
   }
   
-  float breathingPeriod = 2.0; // 2 segundos para um ciclo completo
+  float breathingPeriod = 2.0; 
   float intensityFloat = (sin(2 * PI * elapsedSeconds / breathingPeriod) + 1) / 2.0;
   int intensity = (int)(intensityFloat * 4095);
 
@@ -145,7 +238,6 @@ void runStrobeEffect() {
   unsigned long currentTime = millis();
   if (currentTime - lastStrobeToggleTime >= strobePeriod) {
     strobeLedState = !strobeLedState;
-    // Agora strobeTargetLedPin é global
     ledcWrite(strobeTargetLedPin, strobeLedState ? 4095 : 0); 
     lastStrobeToggleTime = currentTime;
   }
@@ -163,17 +255,16 @@ void runRainbowCycleEffect() {
 
   unsigned long currentTime = millis();
   if (currentTime - lastChaseUpdateTime >= rainbowSpeed) {
-    rainbowHue += 1.0; // Aumenta o matiz (hue)
+    rainbowHue += 1.0; 
     if (rainbowHue >= 360.0) {
-      rainbowHue = 0.0; // Reseta o matiz quando completa o ciclo
+      rainbowHue = 0.0; 
     }
 
-    int* rgb = hsvToRgb(rainbowHue, 1.0, 1.0); // Saturação e valor máximos
+    int* rgb = hsvToRgb(rainbowHue, 1.0, 1.0); 
     ledcWrite(LED_R, rgb[0]);
     ledcWrite(LED_G, rgb[1]);
     ledcWrite(LED_B, rgb[2]);
-    // LED W é ignorado no efeito Rainbow
-    if (LED_W != 0) { // Se o LED_W estiver definido, certifique-se de que ele esteja desligado
+    if (LED_W != 0) { 
       ledcWrite(LED_W, 0); 
     }
 
@@ -182,7 +273,7 @@ void runRainbowCycleEffect() {
 
   if (effectDuration > 0 && (currentTime - effectStartTime) / 1000.0 >= effectDuration) {
     effectActive = false;
-    setAllLeds(0,0,0,0); // Desliga os LEDs no final
+    setAllLeds(0,0,0,0); 
     Serial.println("Efeito rainbow finalizado.");
     currentEffectName = "";
   }
@@ -194,9 +285,9 @@ void runFireFlickerEffect() {
   unsigned long currentTime = millis();
   if (currentTime - lastFlickerTime >= random(flickerDelayMin, flickerDelayMax)) {
     int intensityR = random(flickerMin, flickerMax);
-    int intensityG = random(flickerMin / 4, flickerMax / 2); // Verde menos intenso para fogo
-    int intensityB = 0; // Azul geralmente ausente no fogo
-    int intensityW = random(flickerMin / 2, flickerMax); // Branco para simular brilho/calor
+    int intensityG = random(flickerMin / 4, flickerMax / 2); 
+    int intensityB = 0; 
+    int intensityW = random(flickerMin / 2, flickerMax); 
 
     ledcWrite(LED_R, intensityR);
     ledcWrite(LED_G, intensityG);
@@ -210,7 +301,7 @@ void runFireFlickerEffect() {
 
   if (effectDuration > 0 && (currentTime - effectStartTime) / 1000.0 >= effectDuration) {
     effectActive = false;
-    setAllLeds(0,0,0,0); // Desliga os LEDs no final
+    setAllLeds(0,0,0,0); 
     Serial.println("Efeito fire finalizado.");
     currentEffectName = "";
   }
@@ -221,19 +312,18 @@ void runChaseEffect() {
 
   unsigned long currentTime = millis();
   if (currentTime - lastChaseUpdateTime >= chaseDelay) {
-    setAllLeds(0,0,0,0); // Desliga todos os LEDs
+    setAllLeds(0,0,0,0); 
 
-    // Acende o LED atual na sequência
-    ledcWrite(ledPins[currentChaseLed], 4095); // Acende com força total
+    ledcWrite(ledPins[currentChaseLed], 4095); 
 
-    currentChaseLed = (currentChaseLed + 1) % numLeds; // Avança para o próximo LED
+    currentChaseLed = (currentChaseLed + 1) % numLeds; 
 
     lastChaseUpdateTime = currentTime;
   }
 
   if (effectDuration > 0 && (currentTime - effectStartTime) / 1000.0 >= effectDuration) {
     effectActive = false;
-    setAllLeds(0,0,0,0); // Desliga os LEDs no final
+    setAllLeds(0,0,0,0); 
     Serial.println("Efeito chase finalizado.");
     currentEffectName = "";
   }
@@ -243,22 +333,20 @@ void runChaseEffect() {
 // --- Funções de Manipulação HTTP ---
 
 void handleControl() {
-  // Parâmetro de efeito
   if (server.hasArg("effect")) {
     String effectName = server.arg("effect");
     Serial.print("Efeito solicitado: ");
     Serial.println(effectName);
 
-    // Antes de iniciar um novo efeito, desativa qualquer efeito anterior
     effectActive = false;
-    currentEffectName = ""; // Limpa o nome do efeito anterior
-    setAllLeds(0,0,0,0); // Desliga todos os LEDs para garantir um estado limpo
+    currentEffectName = ""; 
+    setAllLeds(0,0,0,0); 
 
-    effectDuration = server.hasArg("duration") ? server.arg("duration").toFloat() : 0; // Duração em segundos, 0 para infinito
+    effectDuration = server.hasArg("duration") ? server.arg("duration").toFloat() : 0; 
 
     if (effectName.equalsIgnoreCase("breathing")) {
       String targetLed = server.hasArg("led") ? server.arg("led") : "r";
-      effectTargetLedPin = -1; // Reset para o novo efeito
+      effectTargetLedPin = -1; 
       for (int i = 0; i < numLeds; i++) {
         if (targetLed.equalsIgnoreCase(ledNames[i])) {
           effectTargetLedPin = ledPins[i];
@@ -270,12 +358,8 @@ void handleControl() {
         effectActive = true;
         currentEffectName = "breathing";
         effectStartTime = millis();
-        String responseMsg = "Efeito breathing iniciado no LED ";
-        String targetLedUpper = targetLed;
-        targetLedUpper.toUpperCase();
-        responseMsg += targetLedUpper;
+        String responseMsg = "Efeito breathing iniciado no LED " + targetLed;
         server.send(200, "text/plain", responseMsg);
-        Serial.println("Efeito breathing iniciado.");
         return;
       } else {
         server.send(400, "text/plain", "LED alvo para breathing nao encontrado.");
@@ -283,7 +367,7 @@ void handleControl() {
       }
     } else if (effectName.equalsIgnoreCase("strobe")) {
       String targetLed = server.hasArg("led") ? server.arg("led") : "r";
-      effectTargetLedPin = -1; // Reutilizamos effectTargetLedPin
+      effectTargetLedPin = -1; 
       for (int i = 0; i < numLeds; i++) {
         if (targetLed.equalsIgnoreCase(ledNames[i])) {
           effectTargetLedPin = ledPins[i];
@@ -294,17 +378,13 @@ void handleControl() {
       if (effectTargetLedPin != -1) {
         effectActive = true;
         currentEffectName = "strobe";
-        strobeTargetLedPin = effectTargetLedPin; // Atribui ao strobeTargetLedPin global
-        strobePeriod = server.hasArg("period") ? server.arg("period").toInt() : 100; // Parametro para o periodo
+        strobeTargetLedPin = effectTargetLedPin; 
+        strobePeriod = server.hasArg("period") ? server.arg("period").toInt() : 100; 
         lastStrobeToggleTime = millis();
         strobeLedState = true;
         
-        String responseMsg = "Efeito strobe iniciado no LED ";
-        String targetLedUpper = targetLed;
-        targetLedUpper.toUpperCase();
-        responseMsg += targetLedUpper;
+        String responseMsg = "Efeito strobe iniciado no LED " + targetLed;
         server.send(200, "text/plain", responseMsg);
-        Serial.println("Efeito strobe iniciado.");
         return;
       } else {
         server.send(400, "text/plain", "LED alvo para strobe nao encontrado.");
@@ -314,29 +394,26 @@ void handleControl() {
         effectActive = true;
         currentEffectName = "rainbow";
         effectStartTime = millis();
-        rainbowHue = 0.0; // Reinicia o ciclo de cores
-        rainbowSpeed = server.hasArg("speed") ? server.arg("speed").toInt() : 50; // Velocidade do ciclo
+        rainbowHue = 0.0; 
+        rainbowSpeed = server.hasArg("speed") ? server.arg("speed").toInt() : 50; 
         server.send(200, "text/plain", "Efeito rainbow iniciado.");
-        Serial.println("Efeito rainbow iniciado.");
         return;
     } else if (effectName.equalsIgnoreCase("fire")) {
         effectActive = true;
         currentEffectName = "fire";
         effectStartTime = millis();
-        randomSeed(analogRead(0)); // Garante aleatoriedade
+        randomSeed(analogRead(0)); 
         lastFlickerTime = millis();
         server.send(200, "text/plain", "Efeito fire iniciado.");
-        Serial.println("Efeito fire iniciado.");
         return;
     } else if (effectName.equalsIgnoreCase("chase")) {
         effectActive = true;
         currentEffectName = "chase";
         effectStartTime = millis();
-        chaseDelay = server.hasArg("delay") ? server.arg("delay").toInt() : 150; // Velocidade da perseguição
-        currentChaseLed = 0; // Começa pelo primeiro LED
-        setAllLeds(0,0,0,0); // Limpa LEDs antes de iniciar o chase
+        chaseDelay = server.hasArg("delay") ? server.arg("delay").toInt() : 150; 
+        currentChaseLed = 0; 
+        setAllLeds(0,0,0,0); 
         server.send(200, "text/plain", "Efeito chase iniciado.");
-        Serial.println("Efeito chase iniciado.");
         return;
     }
     else {
@@ -345,10 +422,8 @@ void handleControl() {
     }
   }
 
-  // Se não houver parâmetro de efeito, processa os parâmetros de intensidade individual
-  // E desativa qualquer efeito que estivesse ativo
   effectActive = false; 
-  currentEffectName = ""; // Limpa o nome do efeito ativo
+  currentEffectName = ""; 
   
   bool ledControlled = false;
   for (int i = 0; i < numLeds; i++) {
@@ -358,10 +433,6 @@ void handleControl() {
       if (intensity < 0) intensity = 0;
       if (intensity > 4095) intensity = 4095;
       ledcWrite(ledPins[i], intensity);
-      Serial.print("LED ");
-      Serial.print(ledNames[i]);
-      Serial.print(" ajustado para intensidade: ");
-      Serial.println(intensity);
       ledControlled = true;
     }
   }
@@ -371,6 +442,16 @@ void handleControl() {
   } else {
     server.send(400, "text/plain", "Nenhum parametro de LED ou efeito valido fornecido.");
   }
+}
+
+void handleTemperature() {
+  String tempResponse = String(currentTemperatureC, 1); 
+  server.send(200, "text/plain", tempResponse);
+}
+
+void handleHumidity() {
+  String humResponse = String(currentHumidity, 1); 
+  server.send(200, "text/plain", humResponse);
 }
 
 // Função para lidar com a requisição da página inicial (HTML)
@@ -392,10 +473,17 @@ void handleRoot() {
   html += ".effect-btn:hover { background-color: #007bb5; }";
   html += ".stop-btn { background-color: #f44336; margin: 5px; }"; 
   html += ".stop-btn:hover { background-color: #da190b; }";
+  html += "p { margin: 5px 0; }";
   html += "</style>";
   html += "</head>";
   html += "<body>";
   html += "<h1>Controle de LEDs RGBW</h1>";
+
+  html += "<h2>Monitoramento DHT11</h2>";
+  html += "<div>";
+  html += "  <p>Temperatura: <span id='currentTemp'>--</span> &deg;C</p>";
+  html += "  <p>Umidade: <span id='currentHumidity'>--</span> %</p>";
+  html += "</div>";
 
   html += "<h2>Controle Individual</h2>";
   for (int i = 0; i < numLeds; i++) {
@@ -419,23 +507,23 @@ void handleRoot() {
 
   html += "<div>";
   html += "<h3>Strobe</h3>";
-  html += "<button class='effect-btn' onclick='startEffect(\"strobe\", \"r\", 0, 50)'>Vermelho (Rápido)</button>"; // duration=0 (infinite), period=50
-  html += "<button class='effect-btn' onclick='startEffect(\"strobe\", \"g\", 0, 200)'>Verde (Lento)</button>"; // duration=0 (infinite), period=200
+  html += "<button class='effect-btn' onclick='startEffect(\"strobe\", \"r\", 0, 50)'>Vermelho (Rápido)</button>"; 
+  html += "<button class='effect-btn' onclick='startEffect(\"strobe\", \"g\", 0, 200)'>Verde (Lento)</button>"; 
   html += "</div>";
   
   html += "<div>";
   html += "<h3>Rainbow Cycle</h3>";
-  html += "<button class='effect-btn' onclick='startEffect(\"rainbow\", \"\", 0, 30)'>Iniciar Rainbow</button>"; // duration=0, speed=30ms
+  html += "<button class='effect-btn' onclick='startEffect(\"rainbow\", \"\", 0, 30)'>Iniciar Rainbow</button>"; 
   html += "</div>";
 
   html += "<div>";
   html += "<h3>Fire Flicker</h3>";
-  html += "<button class='effect-btn' onclick='startEffect(\"fire\")'>Iniciar Fogo</button>"; // duration=0
+  html += "<button class='effect-btn' onclick='startEffect(\"fire\")'>Iniciar Fogo</button>"; 
   html += "</div>";
 
   html += "<div>";
   html += "<h3>Chase</h3>";
-  html += "<button class='effect-btn' onclick='startEffect(\"chase\", \"\", 0, 100)'>Iniciar Perseguição</button>"; // duration=0, delay=100ms
+  html += "<button class='effect-btn' onclick='startEffect(\"chase\", \"\", 0, 100)'>Iniciar Perseguição</button>"; 
   html += "</div>";
 
   html += "<div>";
@@ -451,14 +539,12 @@ void handleRoot() {
   html += "  xhr.send();";
   html += "}";
 
-  // Função genérica para iniciar efeitos
-  html += "function startEffect(effectName, ledTarget = '', duration = 0, extraParam = 0) {"; // extraParam para speed/period/delay
+  html += "function startEffect(effectName, ledTarget = '', duration = 0, extraParam = 0) {"; 
   html += "  var xhr = new XMLHttpRequest();";
   html += "  var url = '/control?effect=' + effectName;";
   html += "  if (ledTarget) url += '&led=' + ledTarget;";
   html += "  if (duration > 0) url += '&duration=' + duration;";
   
-  // Parâmetro extra para velocidade (rainbow) ou período (strobe) ou delay (chase)
   html += "  if (extraParam > 0) {";
   html += "    if (effectName === 'strobe') {";
   html += "      url += '&period=' + extraParam;"; 
@@ -471,15 +557,42 @@ void handleRoot() {
 
   html += "  xhr.open('GET', url, true);";
   html += "  xhr.send();";
-  html += "  alert('Efeito ' + effectName + ' iniciado.');";
-  html += "}";
+  html += "  console.log('Efeito ' + effectName + ' iniciado.');";
+  html += "}"; 
 
   html += "function stopEffects() {";
   html += "  var xhr = new XMLHttpRequest();";
   html += "  xhr.open('GET', '/control?r_intensity=0&g_intensity=0&b_intensity=0&w_intensity=0', true);"; 
   html += "  xhr.send();";
-  html += "  alert('Efeitos parados e LEDs desligados.');";
+  html += "  console.log('Efeitos parados e LEDs desligados.');"; 
   html += "}";
+
+  html += "function fetchDhtData() {";
+  html += "  // Busca Temperatura";
+  html += "  var xhrTemp = new XMLHttpRequest();";
+  html += "  xhrTemp.onreadystatechange = function() {";
+  html += "    if (xhrTemp.readyState == 4 && xhrTemp.status == 200) {";
+  html += "      document.getElementById('currentTemp').innerText = xhrTemp.responseText;";
+  html += "    }";
+  html += "  };";
+  html += "  xhrTemp.open('GET', '/temp', true);"; 
+  html += "  xhrTemp.send();";
+
+  html += "  // Busca Umidade";
+  html += "  var xhrHum = new XMLHttpRequest();";
+  html += "  xhrHum.onreadystatechange = function() {";
+  html += "    if (xhrHum.readyState == 4 && xhrHum.status == 200) {";
+  html += "      document.getElementById('currentHumidity').innerText = xhrHum.responseText;";
+  html += "    }";
+  html += "  };";
+  html += "  xhrHum.open('GET', '/humidity', true);"; 
+  html += "  xhrHum.send();";
+  html += "}";
+
+  // Chama a função a cada 5 segundos
+  html += "setInterval(fetchDhtData, 5000);"; 
+  // Chama imediatamente ao carregar
+  html += "window.onload = function() { fetchDhtData(); };";
 
   html += "</script>";
   html += "</body>";
@@ -490,11 +603,16 @@ void handleRoot() {
 void setup() {
   Serial.begin(115200);
 
+  ledcSetup(LEDC_CHANNEL, LEDC_BASE_FREQ, LEDC_TIMER_12_BIT);
+
   // Inicia os canais PWM para os LEDs
   for (int i = 0; i < numLeds; i++) {
-    ledcAttachPin(ledPins[i], LEDC_BASE_FREQ);
+    ledcAttachPin(ledPins[i], LEDC_CHANNEL);
     ledcWrite(ledPins[i], 0); // Desliga todos os LEDs no início
   }
+  
+  // --- Inicializa o Sensor DHT11 ---
+  dht.begin(); 
 
   Serial.print("Conectando-se ao Wi-Fi ");
   Serial.println(ssid);
@@ -510,9 +628,14 @@ void setup() {
   Serial.print("Endereço IP: ");
   Serial.println(WiFi.localIP());
 
+  // --- CONFIGURAÇÃO MQTT ---
+  client.setServer(mqtt_server, mqtt_port);
+
   // Configura as rotas do servidor
   server.on("/", handleRoot);
-  server.on("/control", handleControl); // Novo endpoint para controle
+  server.on("/control", handleControl); 
+  server.on("/temp", handleTemperature);   // Endpoint para Temperatura
+  server.on("/humidity", handleHumidity); // Endpoint para Umidade
 
   // Inicia o servidor
   server.begin();
@@ -521,6 +644,12 @@ void setup() {
 
 void loop() {
   server.handleClient(); // Lida com as requisições HTTP
+
+  // --- NOVO: Lida com a conexão MQTT ---
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop(); // Processa mensagens de entrada e mantém o keep-alive
 
   // Executa o efeito ativo, se houver
   if (effectActive) {
@@ -536,4 +665,5 @@ void loop() {
       runChaseEffect();
     }
   }
+  readDhtData(); 
 }

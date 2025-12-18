@@ -5,6 +5,13 @@
 #include <stdlib.h> // Para random()
 #include "secrets.h"
 
+#include "Adafruit_TinyUSB.h"
+#include "iostream/iostream.h"
+#include <string>
+#include <iostream>
+#include <cstring>
+
+
 #include <Adafruit_Sensor.h>
 #include <DHT.h>
 
@@ -12,20 +19,10 @@
 #define LEDC_BASE_FREQ 5000
 #define LEDC_CHANNEL 0
 
-// Defina as credenciais da sua rede Wi-Fi
-const char* ssid = WIFI_SSID;       // Puxa do secrets.h
-const char* password = WIFI_PASSWORD; // Puxa do secrets.h
-
-const char* mqtt_server = MQTT_SERVER; 
-const int mqtt_port = MQTT_PORT;       // Geralmente 1883
-const char* mqtt_user = MQTT_USER;     // Opcional, porem recomendado
-const char* mqtt_password = MQTT_PASSWORD; // Opciona, porem recomendado
-const char* clientID = CLIENTID; // ID único para o broker
-
-
-// Tópicos para publicação
-const char* mqtt_topic_temp = MQTT_TOPIC_TEMP;
-const char* mqtt_topic_hum = MQTT_TOPIC_HUM;
+/**
+ * Removi a Agregacao das variaveis do secrets.h para as locais,
+ * Mas Se quiserem, so sobre-escrevelas no codigo e funcionara.
+ */
 
 // Defina os GPIOs que você soldou no ESP32
 #define LED_R 33
@@ -85,19 +82,40 @@ volatile unsigned long lastChaseUpdateTime = 0;
 volatile int chaseDelay = 150; 
 volatile int currentChaseLed = 0; 
 
+Adafruit_USBH_CDC cdc;
+
+template <typename T>
+void CustomSerialPrint(T message) {
+  if (cdc.connected()) {
+    cdc.print(message);
+  }
+}
+
+template <typename T>
+void CustomSerialPrintln(T message) {
+  if (cdc.connected()) {
+    cdc.println(message);
+  }
+}
+
+
 void reconnect() {
   // Loop até reconectar
   while (!client.connected()) {
-    Serial.print("Tentando conexao MQTT...");
+    CustomSerialPrint("Tentando conexao MQTT...");
     // Tenta conectar, usando as credenciais, se houver
-    if (client.connect(clientID, mqtt_user, mqtt_password)) {
-      Serial.println("conectado");
+    if (client.connect(CLIENTID, MQTT_USER, MQTT_PASSWORD)) {
+      CustomSerialPrintln("conectado");
       // Se desejar se inscrever em algum tópico, faça aqui
-      // client.subscribe("esp32/comando/#"); 
+      // client.subscribe("esp32/comando/#");
+
+      // Adicionei o IP por que meu esp e defeituoso e troca de ip toda hora
+      String ip = WiFi.localIP().toString();
+      client.publish(MQTT_TOPIC_IP, ip.c_str(), true); 
     } else {
-      Serial.print("falhou, rc=");
-      Serial.print(client.state());
-      Serial.println(" Tentando novamente em 5 segundos");
+      CustomSerialPrint("falhou, rc=");
+      CustomSerialPrint(client.state());
+      CustomSerialPrintln(" Tentando novamente em 5 segundos");
       // Espera 5 segundos antes de tentar novamente
       delay(5000);
     }
@@ -170,17 +188,17 @@ void readDhtData() {
     float t = dht.readTemperature();
 
     if (isnan(h) || isnan(t)) {
-      Serial.println("Erro ao ler do sensor DHT!");
+      CustomSerialPrintln("Erro ao ler do sensor DHT!");
     } else {
       currentHumidity = h;
       currentTemperatureC = t;
       
-      Serial.print("Umidade: ");
-      Serial.print(currentHumidity);
-      Serial.print(" %\t");
-      Serial.print("Temperatura: ");
-      Serial.print(currentTemperatureC);
-      Serial.println(" *C");
+      CustomSerialPrint("Umidade: ");
+      CustomSerialPrint(currentHumidity);
+      CustomSerialPrint(" %\t");
+      CustomSerialPrint("Temperatura: ");
+      CustomSerialPrint(currentTemperatureC);
+      CustomSerialPrintln(" *C");
       
       // --- PUBLICAÇÃO MQTT ---
       String tempString = String(currentTemperatureC, 1);
@@ -188,20 +206,20 @@ void readDhtData() {
       
       if (client.connected()) {
         // Publica a temperatura
-        client.publish(mqtt_topic_temp, tempString.c_str(), false); // false = não retido
-        Serial.print("Publicado no MQTT: ");
-        Serial.print(mqtt_topic_temp);
-        Serial.print(" -> ");
-        Serial.println(tempString);
+        client.publish(MQTT_TOPIC_TEMP, tempString.c_str(), false); // false = não retido
+        CustomSerialPrint("Publicado no MQTT: ");
+        CustomSerialPrint(MQTT_TOPIC_TEMP);
+        CustomSerialPrint(" -> ");
+        CustomSerialPrintln(tempString.c_str());
         
         // Publica a umidade
-        client.publish(mqtt_topic_hum, humString.c_str(), false);
-        Serial.print("Publicado no MQTT: ");
-        Serial.print(mqtt_topic_hum);
-        Serial.print(" -> ");
-        Serial.println(humString);
+        client.publish(MQTT_TOPIC_HUM, humString.c_str(), false);
+        CustomSerialPrint("Publicado no MQTT: ");
+        CustomSerialPrint(MQTT_TOPIC_HUM);
+        CustomSerialPrint(" -> ");
+        CustomSerialPrintln(humString);
       } else {
-        Serial.println("Cliente MQTT desconectado. Nao publicou.");
+        CustomSerialPrintln("Cliente MQTT desconectado. Nao publicou.");
       }
     }
     lastTempReadTime = millis();
@@ -217,7 +235,7 @@ void runBreathingEffect() {
   if (effectDuration > 0 && elapsedSeconds >= effectDuration) {
     effectActive = false;
     ledcWrite(effectTargetLedPin, 0);
-    Serial.println("Efeito breathing finalizado.");
+    CustomSerialPrintln("Efeito breathing finalizado.");
     currentEffectName = ""; 
     return;
   }
@@ -245,7 +263,7 @@ void runStrobeEffect() {
   if (effectDuration > 0 && (currentTime - effectStartTime) / 1000.0 >= effectDuration) {
     effectActive = false;
     ledcWrite(strobeTargetLedPin, 0);
-    Serial.println("Efeito strobe finalizado.");
+    CustomSerialPrintln("Efeito strobe finalizado.");
     currentEffectName = "";
   }
 }
@@ -274,7 +292,7 @@ void runRainbowCycleEffect() {
   if (effectDuration > 0 && (currentTime - effectStartTime) / 1000.0 >= effectDuration) {
     effectActive = false;
     setAllLeds(0,0,0,0); 
-    Serial.println("Efeito rainbow finalizado.");
+    CustomSerialPrintln("Efeito rainbow finalizado.");
     currentEffectName = "";
   }
 }
@@ -302,7 +320,7 @@ void runFireFlickerEffect() {
   if (effectDuration > 0 && (currentTime - effectStartTime) / 1000.0 >= effectDuration) {
     effectActive = false;
     setAllLeds(0,0,0,0); 
-    Serial.println("Efeito fire finalizado.");
+    CustomSerialPrintln("Efeito fire finalizado.");
     currentEffectName = "";
   }
 }
@@ -324,7 +342,7 @@ void runChaseEffect() {
   if (effectDuration > 0 && (currentTime - effectStartTime) / 1000.0 >= effectDuration) {
     effectActive = false;
     setAllLeds(0,0,0,0); 
-    Serial.println("Efeito chase finalizado.");
+    CustomSerialPrintln("Efeito chase finalizado.");
     currentEffectName = "";
   }
 }
@@ -335,8 +353,8 @@ void runChaseEffect() {
 void handleControl() {
   if (server.hasArg("effect")) {
     String effectName = server.arg("effect");
-    Serial.print("Efeito solicitado: ");
-    Serial.println(effectName);
+    CustomSerialPrint("Efeito solicitado: ");
+    CustomSerialPrintln(effectName);
 
     effectActive = false;
     currentEffectName = ""; 
@@ -614,22 +632,22 @@ void setup() {
   // --- Inicializa o Sensor DHT11 ---
   dht.begin(); 
 
-  Serial.print("Conectando-se ao Wi-Fi ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
+  CustomSerialPrint("Conectando-se ao Wi-Fi ");
+  CustomSerialPrintln(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
+    CustomSerialPrint(".");
   }
 
-  Serial.println("");
-  Serial.println("WiFi conectado!");
-  Serial.print("Endereço IP: ");
-  Serial.println(WiFi.localIP());
+  CustomSerialPrintln("");
+  CustomSerialPrintln("WiFi conectado!");
+  CustomSerialPrint("Endereço IP: ");
+  CustomSerialPrintln(WiFi.localIP());
 
   // --- CONFIGURAÇÃO MQTT ---
-  client.setServer(mqtt_server, mqtt_port);
+  client.setServer(MQTT_SERVER, MQTT_PORT);
 
   // Configura as rotas do servidor
   server.on("/", handleRoot);
@@ -639,7 +657,7 @@ void setup() {
 
   // Inicia o servidor
   server.begin();
-  Serial.println("Servidor HTTP iniciado");
+  CustomSerialPrintln("Servidor HTTP iniciado");
 }
 
 void loop() {

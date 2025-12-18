@@ -1,7 +1,7 @@
 # mqtt_subscriber.py
 
 import paho.mqtt.client as mqtt
-
+import os
 # --- Puxa as variáveis de configuração do arquivo config.py ---
 from config import *
 
@@ -16,7 +16,6 @@ def on_message(client, userdata, msg):
         
         print("-" * 30)
         print(f"[{msg.topic}] RECEBIDO:")
-        
         if msg.topic == MQTT_TOPIC_TEMP:
             # Note: A conversão para float é boa prática para garantir que é um número
             temp_value = float(payload_str)
@@ -24,6 +23,9 @@ def on_message(client, userdata, msg):
         elif msg.topic == MQTT_TOPIC_HUM:
             hum_value = float(payload_str)
             print(f"Umidade: {hum_value:.2f} %")
+        elif msg.topic == MQTT_TOPIC_IP:
+            ip_value = str(payload_str)
+            print(f"IP do ESP: {ip_value}")
         else:
             print(f"Mensagem: {payload_str}")
         print("-" * 30)
@@ -38,13 +40,15 @@ def on_connect(client, userdata, flags, rc):
     Verifica o status da conexão e se inscreve nos tópicos se a conexão for bem-sucedida.
     """
     if rc == 0:
+        os.system("clear")
         print(f"Conectado ao broker MQTT com sucesso: {MQTT_BROKER}")
         
         # Inscrição nos tópicos
         # Lista de tuplas (tópico, QoS)
         topics_to_subscribe = [
             (MQTT_TOPIC_TEMP, 0),
-            (MQTT_TOPIC_HUM, 0)
+            (MQTT_TOPIC_HUM, 0),
+            (MQTT_TOPIC_IP, 0)
         ]
         client.subscribe(topics_to_subscribe)
         

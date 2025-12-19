@@ -1,4 +1,7 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:venv",
-    "python-envs.pythonProjects": []
+    "python-envs.pythonProjects": [],
+    "python.terminal.activateEnvironment": true,
+    "terminal.integrated.shellIntegration.enabled": true,
+    "python.terminal.activateEnvInSelectedTerminal": true 
 }
